@@ -2,7 +2,9 @@
 
 The engine runs an uploaded sequence of up to 64 operations after one START. The same bitstream accepts different shapes, addresses, and weight precisions. The existing Conv1 project and overlay are the baseline.
 
-The engine supports signed INT8 activations, signed packed INT4 or INT8 weights, 3×3 convolution, stride 1 or 2, padding 0 or 1, per-filter bias and Q31 requantization, and optional ReLU. The add engine combines a main tensor with a Q31-scaled second tensor before rounding and saturation. Tensor data is CHW. Each convolution filter starts on a 32-bit weight-word boundary, with the first weight in the least significant lane. Activation storage is 64 KiB, weight storage is 4096 words, and parameter storage holds 256 bias/multiplier pairs. Convolution accepts up to 1024 taps per filter. The host builds descriptors with the provided constructors, checks the supported ranges, and keeps the output span outside the live input spans.
+The engine supports signed INT8 activations, signed packed INT4 or INT8 weights, binary ±1 weights, 3×3 convolution, stride 1 or 2, padding 0 or 1, per-filter bias and Q31 requantization, and optional ReLU. Scaled add combines a main tensor with a Q31-scaled second tensor. The remaining operations are stride-2 skip downsampling with centered zero channel padding, global average pooling over power-of-two spatial areas, and a linear classifier that returns signed INT32 accumulators.
+
+Tensor data is CHW. Each filter starts on a 32-bit weight-word boundary, with the first weight in the least significant lane. Binary words store +1 as zero and −1 as one. Activation storage is 64 KiB, weight storage is 65,536 words, and parameter storage holds 1,024 bias/multiplier pairs. Convolution accepts up to 1,024 taps per filter. The host builds descriptors with the provided constructors, checks the supported ranges, and keeps the output span outside the live input spans.
 
 ## Build and simulate
 
@@ -26,9 +28,30 @@ xsim --% programmable_check -testplusarg "block=programmable/build/block_vectors
 
 The exporter runs the CPU model with the same quantized image, exports checkpoint parameters, and saves four separate expected tensors. The block simulation compares all four (65,536 values), then runs the alternate program. Conv1 starts with the image at byte address 0. The three convolution results are kept at addresses 16384, 32768, and 49152. The final residual output reuses address 0 after the image has been consumed, leaving all four results available for inspection.
 
+### Export and simulate the full checkpoint
+
+From the Vivado project directory, run:
+
+```powershell
+python programmable/export_full.py --reference "PATH_TO_SOFTWARE_REFERENCE" --sim-dir programmable/build/full_vectors
+xvlog -sv Mixed_Precision_Acc.srcs/sources_1/new/dotprod.v programmable/programmable_mmio.v programmable/tb_full_model.sv
+xelab tb_full_model -s full_model_check
+xsim full_model_check -runall
+```
+
+The exporter writes `pynq/full_model.json`. The reference checkpoint and its Python CPU model are required to regenerate the file. The board uses the JSON directly. The simulator checks each operation as it finishes, before the next operation can reuse its buffer. The full program uses four 16 KiB activation banks and returns ten classifier accumulators.
+
 ## Run on the PYNQ-Z2
 
-Upload the repository's `pynq/` folder to Jupyter on the PYNQ-Z2. Open `verify.ipynb` and run its cells. The exporter updates `pynq/block.json` directly. The block case should print four PASS lines of 16,384 values each. The alternate case should print two PASS lines of two values each. A terminal run is also supported.
+Upload the repository's `pynq/` folder to Jupyter on the PYNQ-Z2. Open `full_model.ipynb` to load the checkpoint once and run one START per image. The FPGA returns only ten classifier accumulators. The ARM multiplies each accumulator by its exported class scale and compares the results with the CPU reference. The notebook reports model upload, FPGA compute, and per-image ARM timings. The CLI equivalent is `python3 pynq_full_model.py` from that folder.
+
+The prepared `pynq/cifar10_cases.json` covers test indices 0–99. Run the notebook's last cell to measure FPGA accuracy against the labels and compare all ten outputs per image with the CPU reference. To regenerate the file or use another range, use CPU PyTorch and NumPy with the extracted [CIFAR-10 Python test_batch](https://www.cs.toronto.edu/~kriz/cifar.html):
+
+```powershell
+python programmable/export_full.py --reference "PATH_TO_SOFTWARE_REFERENCE" --dataset "PATH_TO_CIFAR10_ROOT" --start 0 --count 100 --cases-output programmable/build/cifar10_cases.json
+```
+
+Copy any regenerated `cifar10_cases.json` beside the notebook. To run the block and alternate regressions on the board, use `verify.ipynb`.
 
 ```bash
 python3 pynq_programmable.py programmable.bit block.json
@@ -43,12 +66,12 @@ Each descriptor has eight 32-bit words. Addresses are byte offsets for activatio
 
 | Word | Fields |
 |---|---|
-| 0 | Opcode in bits 1:0 (1 convolution, 2 add). Bits 2–5 are INT4, ReLU, stride 2, and pad 1, respectively. |
+| 0 | Opcode in bits 1:0 (1 convolution or linear, 2 add, 3 pooling or projection). Bits 2–7 are INT4, ReLU, stride 2, pad 1, binary, and linear in convolution descriptors. Bit 2 distinguishes skip projection from pooling for opcode 3. |
 | 1 | Source/main address in bits 15:0, destination in 31:16. |
-| 2 | Convolution width, height, input channels, output channels in bytes 0–3. |
-| 3 | Convolution output width and height in bytes 0–1. |
-| 4 | Packed weight-word base in bits 15:0, bias/multiplier base in bits 23:16. |
+| 2 | Input width, height, input channels, and output channels in bytes 0–3. |
+| 3 | Output width and height in bytes 0–1, or pooling's area shift in bits 19:16. |
+| 4 | Packed weight-word base in bits 15:0 and parameter base in bits 25:16. For projection, bits 7:0 hold left channel padding. |
 | 5 | Add second source in bits 15:0, number of elements minus one in bits 31:16. |
 | 6–7 | Add signed Q31 multiplier, low word then high word. |
 
-The handshake uses command bit 31 as the request toggle, bits 27:24 as the opcode, and bits 15:0 as the index. Host ops 1–5 write activation, weight, bias, multiplier low, and multiplier high. Op 6 starts the program with descriptor count in the payload. Op 7 reads an activation byte, op 8 reads cycles, and op 10 writes a descriptor word. Reply status bits 0–3 are acknowledgment, busy, done, and fault.
+The handshake uses command bit 31 as the request toggle, bits 27:24 as the opcode, and bits 15:0 as the index. Host ops 1–5 write activation, weight, bias, multiplier low, and multiplier high. Op 6 starts the program with descriptor count in the payload. Op 7 reads an activation byte, op 8 reads cycles, and op 10 writes a descriptor word. Op 11 reads a classifier accumulator and op 12 reads the full-model ABI identifier. Reply status bits 0–3 are acknowledgment, busy, done, and fault.

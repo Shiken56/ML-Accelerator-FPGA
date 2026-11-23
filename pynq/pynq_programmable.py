@@ -22,7 +22,7 @@ def conv(src, dst, shape, filters, word_base, param_base, bits, stride, pad, rel
     channels, height, width = shape
     if not all(1 <= n <= 255 for n in (*shape, filters)) or channels * 9 > 1024:
         raise ValueError("Unsupported convolution dimensions")
-    if bits not in (4, 8) or stride not in (1, 2) or pad not in (0, 1):
+    if bits not in (1, 4, 8) or stride not in (1, 2) or pad not in (0, 1):
         raise ValueError("Unsupported convolution configuration")
     out_h = (height + 2 * pad - 3) // stride + 1
     out_w = (width + 2 * pad - 3) // stride + 1
@@ -31,9 +31,9 @@ def conv(src, dst, shape, filters, word_base, param_base, bits, stride, pad, rel
     disjoint(tensor(dst, filters * out_h * out_w), tensor(src, channels * height * width))
     lanes = 32 // bits
     words = filters * ((channels * 9 + lanes - 1) // lanes)
-    if not (0 <= word_base <= 4096 - words and 0 <= param_base <= 256 - filters):
+    if not (0 <= word_base <= 65536 - words and 0 <= param_base <= 1024 - filters):
         raise ValueError("Convolution parameters exceed memory capacity")
-    flags = 1 | ((bits == 4) << 2) | (bool(relu) << 3) | ((stride == 2) << 4) | (pad << 5)
+    flags = 1 | ((bits == 4) << 2) | (bool(relu) << 3) | ((stride == 2) << 4) | (pad << 5) | ((bits == 1) << 6)
     return [
         flags, src | (dst << 16),
         width | (height << 8) | (channels << 16) | (filters << 24),
@@ -53,15 +53,23 @@ def add(main, skip, dst, length, skip_multiplier, relu):
 
 
 def pack_filters(filters, bits):
+    if bits not in (1, 4, 8):
+        raise ValueError("Unsupported weight precision")
     lanes = 32 // bits
     mask = (1 << bits) - 1
     words = []
     for weights in filters:
-        if any(not -(1 << (bits - 1)) <= weight < (1 << (bits - 1)) for weight in weights):
-            raise ValueError("Weight does not fit its declared precision")
-        for offset in range(0, len(weights), lanes):
-            words.append(sum((value & mask) << (bits * lane)
-                             for lane, value in enumerate(weights[offset:offset + lanes])))
+        if bits == 1:
+            if any(weight not in (-1, 1) for weight in weights):
+                raise ValueError("Binary weights must be +1 or -1")
+            codes = [int(weight < 0) for weight in weights]
+        else:
+            if any(not -(1 << (bits - 1)) <= weight < (1 << (bits - 1)) for weight in weights):
+                raise ValueError("Weight does not fit its declared precision")
+            codes = [weight & mask for weight in weights]
+        for offset in range(0, len(codes), lanes):
+            words.append(sum(code << (bits * lane)
+                             for lane, code in enumerate(codes[offset:offset + lanes])))
     return words
 
 

@@ -4,14 +4,19 @@ set build [file join $src build]
 set board_dir [file join [file dirname $root] pynq]
 file mkdir $build
 
-# Export the known-good PS/GPIO wiring and recreate it in an isolated project.
-open_project [file join $root Mixed_Precision_Acc.xpr]
+# Open a copy because Vivado can refresh module-reference metadata on open.
+set template [file join $build baseline_[pid]]
+file mkdir $template
+file copy [file join $root Mixed_Precision_Acc.xpr] $template
+file copy [file join $root Mixed_Precision_Acc.srcs] $template
+open_project [file join $template Mixed_Precision_Acc.xpr]
 set part [get_property PART [current_project]]
 set board [get_property BOARD_PART [current_project]]
 open_bd_design [get_files */conv1_bd.bd]
 set exported [file join $build wiring.tcl]
 write_bd_tcl -force $exported
 close_project
+file delete -force $template
 set handle [open $exported r]
 set wiring [string map {conv1_mmio programmable_mmio conv1_bd programmable_bd} [read $handle]]
 close $handle
