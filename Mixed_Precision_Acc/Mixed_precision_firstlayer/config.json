@@ -1,0 +1,32 @@
+{
+  "input_shape": [
+    3,
+    32,
+    32
+  ],
+  "output_shape": [
+    16,
+    32,
+    32
+  ],
+  "weight_shape": [
+    16,
+    3,
+    3,
+    3
+  ],
+  "input_and_output_order": "channel, row, column",
+  "weight_order": "output_channel, input_channel, kernel_row, kernel_column",
+  "weight_packing": "eight INT4 weights per word, first weight in bits 3:0",
+  "stride": 1,
+  "padding": 1,
+  "input_scale": 0.016744005398487482,
+  "output_scale": 0.05239647016750546,
+  "requantization_shift": 31,
+  "rounding": "nearest, ties away from zero",
+  "output_range_after_relu": [
+    0,
+    127
+  ],
+  "reference_status": "CPU reference; comparison with original GPU pending"
+}

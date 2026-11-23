@@ -1,0 +1,40 @@
+﻿# Vivado and simulator outputs
+.Xil/
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.bda
+xsim.dir/
+NA/
+*.jou
+*.log
+*.pb
+*.wdb
+*.dmp
+*.str
+*.rpt
+*.dcp
+*.ltx
+*.xsa
+/Mixed_Precision_Acc/programmable/build/
+/Mixed_Precision_Acc/sim_data/
+
+# Local tooling and notebook caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+.env
+*.zip
+*.npy
+
+# Keep only the board overlays used by the two notebook workflows
+*.bit
+*.hwh
+!/pynq/programmable.bit
+!/pynq/programmable.hwh
+!/Mixed_Precision_Acc/conv1.bit
+!/Mixed_Precision_Acc/conv1.hwh
