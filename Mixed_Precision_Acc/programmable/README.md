@@ -51,7 +51,7 @@ The prepared `pynq/cifar10_cases.json` covers test indices 0–99. Run the noteb
 python programmable/export_full.py --reference "PATH_TO_SOFTWARE_REFERENCE" --dataset "PATH_TO_CIFAR10_ROOT" --start 0 --count 100 --cases-output programmable/build/cifar10_cases.json
 ```
 
-Copy any regenerated `cifar10_cases.json` beside the notebook. To run the block and alternate regressions on the board, use `verify.ipynb`.
+Copy any regenerated `cifar10_cases.json` beside the notebook. For the block and alternate regressions, see [Hardware progress](../../README.md#hardware-progress).
 
 ## Precision and weight-retention experiments
 

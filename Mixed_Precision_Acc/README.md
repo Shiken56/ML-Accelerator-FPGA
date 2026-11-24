@@ -30,8 +30,7 @@ overlay for the Conv1 regression.
 ## Test on the board
 
 Upload the matching overlay pair, `../pynq/pynq_conv1.py`, and the five `.mem` files
-under `Mixed_precision_firstlayer/`. For the notebook test, upload
-`../pynq/conv1_verify.ipynb` beside the overlay and helper. On the PYNQ-Z2, with the vector folder
+under `Mixed_precision_firstlayer/`. On the PYNQ-Z2, with the vector folder
 next to the overlay and helper, run:
 
 ```bash
