@@ -13,6 +13,8 @@ module programmable_mmio (
     reg [4:0] state;
     reg ack, busy, done, fault;
     reg [31:0] cycles;
+    reg [31:0] op_start, weight_reads, activation_reads, activation_writes, score_writes;
+    reg [31:0] operation_cycles [0:63];
     reg [5:0] pc;
     reg [6:0] count;
     wire request = resetn && command[31] != ack;
@@ -23,6 +25,7 @@ module programmable_mmio (
 
     (* ram_style = "block" *) reg [7:0] activations [0:65535];
     (* ram_style = "block" *) reg [31:0] weights [0:65535];
+    (* ram_style = "block" *) reg [31:0] weights_upper [0:4095];
     (* ram_style = "block" *) reg signed [31:0] biases [0:1023];
     (* ram_style = "block" *) reg [31:0] multipliers_low [0:1023];
     (* ram_style = "block" *) reg [31:0] multipliers_high [0:1023];
@@ -41,7 +44,8 @@ module programmable_mmio (
     reg [7:0] height, width, channels, out_channels, out_h, out_w;
     reg [7:0] row, col, out_ch, channel_padding;
     reg [9:0] param_index;
-    reg [15:0] filter_base, filter_words;
+    reg [16:0] filter_base;
+    reg [15:0] filter_words;
     reg signed [63:0] multiplier, product, scaled_skip;
     reg signed [31:0] filter_bias, conv_multiplier_low, conv_multiplier_high;
     reg signed [31:0] biased;
@@ -79,10 +83,12 @@ module programmable_mmio (
                     (state == PROJECT_READ && project_valid) || (host_idle && operation == 7);
     wire act_write = state == WRITE || (host_idle && operation == 1);
     wire [15:0] write_address = state == WRITE ? dst + position : index;
-    wire [15:0] weight_address = filter_base +
+    wire [16:0] weight_address = filter_base +
                                  (binary ? {8'b0, weight_offset[9:2]} : {6'b0, weight_offset});
     reg signed [7:0] activation_data;
-    reg [31:0] weight_data;
+    reg [31:0] weight_lower_data, weight_upper_data;
+    reg weight_upper_selected;
+    wire [31:0] weight_data = weight_upper_selected ? weight_upper_data : weight_lower_data;
     reg [1:0] binary_group;
     wire [7:0] binary_bits = weight_data[8*binary_group +: 8];
     wire [31:0] expanded_weights;
@@ -95,7 +101,9 @@ module programmable_mmio (
         if (act_read) activation_data <= activations[read_address];
         if (act_write) activations[write_address] <= state == WRITE ? output_byte : payload[7:0];
         if (weight_re) begin
-            weight_data <= weights[weight_address];
+            weight_upper_selected <= weight_address[16];
+            if (weight_address[16]) weight_upper_data <= weights_upper[weight_address[11:0]];
+            else weight_lower_data <= weights[weight_address[15:0]];
             binary_group <= weight_offset[1:0];
         end
         if (state == SETUP) begin
@@ -104,7 +112,10 @@ module programmable_mmio (
             conv_multiplier_high <= multipliers_high[param_index];
         end
         if (state == WRITE_RAW) classifier_result[out_ch] <= biased;
-        if (host_idle && operation == 2) weights[index] <= payload;
+        if (host_idle && operation == 2) begin
+            if (!command[16]) weights[index] <= payload;
+            else if (index < 4096) weights_upper[index[11:0]] <= payload;
+        end
         if (host_idle && operation == 3) biases[index[9:0]] <= payload;
         if (host_idle && operation == 4) multipliers_low[index[9:0]] <= payload;
         if (host_idle && operation == 5) multipliers_high[index[9:0]] <= payload;
@@ -162,14 +173,32 @@ module programmable_mmio (
             cycles <= 0;
             reply <= 0;
         end else begin
-            if (busy) cycles <= cycles + 1'b1;
+            if (busy) begin
+                cycles <= cycles + 1'b1;
+                if (weight_re) weight_reads <= weight_reads + 1'b1;
+                if (act_read) activation_reads <= activation_reads + 1'b1;
+                if (state == WRITE) activation_writes <= activation_writes + 1'b1;
+                if (state == WRITE_RAW) score_writes <= score_writes + 1'b1;
+            end
 
             // The host may poll registers while the sequencer runs.
             if (request && state != READBACK && !(host_idle && operation == 7)) begin
                 ack <= command[31];
                 reply <= operation == 8 ? cycles : 32'd0;
                 if (host_idle && operation == 11) reply <= classifier_result[index[7:0]];
-                if (host_idle && operation == 12) reply <= 32'h4d504132;
+                if (host_idle && operation == 12)
+                    reply <= index == 1 ? 32'h4d504133 : 32'h4d504132;
+                if (host_idle && operation == 13 && done && index < count)
+                    reply <= operation_cycles[index[5:0]];
+                if (host_idle && operation == 14 && done) begin
+                    case (index)
+                        0: reply <= weight_reads;
+                        1: reply <= activation_reads;
+                        2: reply <= activation_writes;
+                        3: reply <= score_writes;
+                        default: reply <= 0;
+                    endcase
+                end
             end
 
             case (state)
@@ -182,6 +211,10 @@ module programmable_mmio (
                             count <= payload[6:0];
                             pc <= 0;
                             cycles <= 0;
+                            weight_reads <= 0;
+                            activation_reads <= 0;
+                            activation_writes <= 0;
+                            score_writes <= 0;
                             busy <= 1;
                             state <= DECODE;
                         end
@@ -193,6 +226,7 @@ module programmable_mmio (
                     state <= IDLE;
                 end
                 DECODE: begin
+                    op_start <= cycles;
                     is_add <= flags[1:0] == 2;
                     is_pool <= flags[1:0] == 3 && !flags[2];
                     is_project <= flags[1:0] == 3 && flags[2];
@@ -210,7 +244,7 @@ module programmable_mmio (
                     out_channels <= dimensions[31:24];
                     out_w <= output_shape[7:0];
                     out_h <= output_shape[15:8];
-                    filter_base <= parameters[15:0];
+                    filter_base <= {parameters[26], parameters[15:0]};
                     param_index <= parameters[25:16];
                     channel_padding <= parameters[7:0];
                     skip_src <= add_args[15:0];
@@ -292,6 +326,7 @@ module programmable_mmio (
                 end
                 WRITE, WRITE_RAW: begin
                     if (last_value) begin
+                        operation_cycles[pc] <= cycles - op_start + 1'b1;
                         if ({1'b0, pc} + 7'd1 == count) begin
                             done <= 1;
                             busy <= 0;

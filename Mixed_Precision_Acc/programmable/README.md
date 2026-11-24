@@ -4,7 +4,7 @@ The engine runs an uploaded sequence of up to 64 operations after one START. The
 
 The engine supports signed INT8 activations, signed packed INT4 or INT8 weights, binary ±1 weights, 3×3 convolution, stride 1 or 2, padding 0 or 1, per-filter bias and Q31 requantization, and optional ReLU. Scaled add combines a main tensor with a Q31-scaled second tensor. The remaining operations are stride-2 skip downsampling with centered zero channel padding, global average pooling over power-of-two spatial areas, and a linear classifier that returns signed INT32 accumulators.
 
-Tensor data is CHW. Each filter starts on a 32-bit weight-word boundary, with the first weight in the least significant lane. Binary words store +1 as zero and −1 as one. Activation storage is 64 KiB, weight storage is 65,536 words, and parameter storage holds 1,024 bias/multiplier pairs. Convolution accepts up to 1,024 taps per filter. The host builds descriptors with the provided constructors, checks the supported ranges, and keeps the output span outside the live input spans.
+Tensor data is CHW. Each filter starts on a 32-bit weight-word boundary, with the first weight in the least significant lane. Binary words store +1 as zero and −1 as one. Activation storage is 64 KiB, weight storage is 69,632 words (272 KiB), and parameter storage holds 1,024 bias/multiplier pairs. Convolution accepts up to 1,024 taps per filter. The host builds descriptors with the provided constructors, checks the supported ranges, and keeps the output span outside the live input spans.
 
 ## Build and simulate
 
@@ -53,6 +53,30 @@ python programmable/export_full.py --reference "PATH_TO_SOFTWARE_REFERENCE" --da
 
 Copy any regenerated `cifar10_cases.json` beside the notebook. To run the block and alternate regressions on the board, use `verify.ipynb`.
 
+## Precision and weight-retention experiments
+
+Use the same instrumented overlay for the independently trained INT8, INT4, and mixed checkpoints. The prepared files under `pynq/benchmark_data/` contain each model and its own CPU reference for CIFAR-10 test indices 0–99. Image preprocessing is shared, and input quantization uses each checkpoint's calibrated scale.
+
+From the board's PYNQ directory, open `precision_lab.ipynb` for the live demo. Run the benchmark from a board terminal with exclusive use of the FPGA. Restart the demo kernel after terminal runs so it can load its own model and synchronize the command interface.
+
+```bash
+python3 precision_benchmark.py --limit 3 --output benchmark_smoke.json
+python3 precision_benchmark.py --policy resident
+python3 precision_benchmark.py --policy reload --resume
+```
+
+The full benchmark runs six groups of 100 images. The reload experiment takes longer because it sends thousands of packed words for every image. The runner writes `benchmark_results.json` after each group. Use **Reload measurements** in the comparison tab to read saved results. The resident policy uploads the model once. The reload policy uploads packed weights again before each image, with the program, biases and multipliers still resident. Policy latency includes that extra upload where applicable. Model upload is separate. Payload bytes count the 32-bit parameter and descriptor words at the application boundary. They exclude MMIO addressing and acknowledgement traffic.
+
+The hardware tab shows a single measured inference's counters. Weight reads count accesses to local weight BRAM, including any repeated packed-word reads. Activation counters count compute-side BRAM strobes, and classifier writes count writes to the final score array. Input writes by the ARM and score reads are outside those FPGA compute counters. The latency-aware selector uses the first 70% of images for calibration and compares its recommendation and an accuracy-first baseline on the remaining images. The accuracy floor is a calibration constraint. Held-out accuracy is measured separately.
+
+To regenerate the model and reference files for the prepared comparison, run the following from the Vivado project directory:
+
+```powershell
+foreach ($variant in "int8", "int4", "mixed") {
+    python programmable/export_full.py --reference "PATH_TO_SOFTWARE_REFERENCE" --dataset "PATH_TO_TEST_BATCH" --variant $variant --output "../pynq/benchmark_data/${variant}_model.json" --cases-output "../pynq/benchmark_data/${variant}_cases.json" --sim-dir "programmable/build/benchmark_$variant"
+}
+```
+
 ```bash
 python3 pynq_programmable.py programmable.bit block.json
 python3 pynq_programmable.py programmable.bit alternate.json
@@ -70,8 +94,10 @@ Each descriptor has eight 32-bit words. Addresses are byte offsets for activatio
 | 1 | Source/main address in bits 15:0, destination in 31:16. |
 | 2 | Input width, height, input channels, and output channels in bytes 0–3. |
 | 3 | Output width and height in bytes 0–1, or pooling's area shift in bits 19:16. |
-| 4 | Packed weight-word base in bits 15:0 and parameter base in bits 25:16. For projection, bits 7:0 hold left channel padding. |
+| 4 | Packed weight-word base in bits 15:0 and 26 (high bit), and parameter base in bits 25:16. For projection, bits 7:0 hold left channel padding. |
 | 5 | Add second source in bits 15:0, number of elements minus one in bits 31:16. |
 | 6–7 | Add signed Q31 multiplier, low word then high word. |
 
 The handshake uses command bit 31 as the request toggle, bits 27:24 as the opcode, and bits 15:0 as the index. Host ops 1–5 write activation, weight, bias, multiplier low, and multiplier high. Op 6 starts the program with descriptor count in the payload. Op 7 reads an activation byte, op 8 reads cycles, and op 10 writes a descriptor word. Op 11 reads a classifier accumulator and op 12 reads the full-model ABI identifier. Reply status bits 0–3 are acknowledgment, busy, done, and fault.
+
+Weight uploads (op 2) use command bit 16 as the high address bit. ABI query op 12 at index 1 identifies the instrumented overlay. Op 13 returns cycles at the requested operation index after completion. Op 14 indexes the weight-read, activation-read, activation-write, and classifier-write counters in that order.

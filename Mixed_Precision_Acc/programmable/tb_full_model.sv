@@ -17,11 +17,11 @@ module tb_full_model;
     programmable_mmio dut (.clk(clk), .resetn(resetn), .command(command),
                            .payload(payload), .reply(reply), .status(status));
 
-    task issue(input [3:0] op, input [15:0] address, input [31:0] data);
+    task issue(input [3:0] op, input [16:0] address, input [31:0] data);
         begin
             @(negedge clk);
             toggle = !toggle;
-            command = {toggle, 3'b0, op, 8'b0, address};
+            command = {toggle, 3'b0, op, 7'b0, address};
             payload = data;
             @(negedge clk);
             while (status[0] !== toggle) @(negedge clk);
@@ -51,7 +51,7 @@ module tb_full_model;
         issue(12, 0, 0);
         if (reply !== 32'h4d504132) $fatal(1, "Incorrect full-model ABI");
         for (i = 0; i < commands_count; i = i + 1)
-            issue(commands[i][51:48], commands[i][47:32], commands[i][31:0]);
+            issue(commands[i][55:52], commands[i][48:32], commands[i][31:0]);
 
         issue(6, 0, stage_count);
         checked = 0;
@@ -79,6 +79,17 @@ module tb_full_model;
         issue(8, 0, 0);
         $display("PASS full model: %0d exact values over %0d operations, %0d cycles",
                  checked, stage_count, reply);
+        checked = reply;
+        offset = 0;
+        for (i = 0; i < stage_count; i = i + 1) begin
+            issue(13, i, 0);
+            if (reply == 0) $fatal(1, "Missing operation cycles for stage %0d", i);
+            offset = offset + reply;
+        end
+        if (offset != checked) $fatal(1, "Operation cycles do not sum to inference cycles");
+        issue(14, 3, 0);
+        if (reply != 10) $fatal(1, "Expected ten classifier writes");
+        $display("PASS instrumentation: operation cycles sum to total; ten classifier writes");
         $finish;
     end
 

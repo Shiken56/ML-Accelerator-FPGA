@@ -39,11 +39,11 @@ def linear(src, inputs, outputs, word_base, param_base, bits):
         raise ValueError("Unsupported classifier configuration")
     lanes = 32 // bits
     words = outputs * ((inputs + lanes - 1) // lanes)
-    if not (0 <= word_base <= 65536 - words and 0 <= param_base <= 1024 - outputs):
+    if not (0 <= word_base <= 69632 - words and 0 <= param_base <= 1024 - outputs):
         raise ValueError("Classifier parameters exceed memory capacity")
     flags = 129 | ((bits == 4) << 2) | ((bits == 1) << 6)
     return [flags, src, 0x0101 | inputs << 16 | outputs << 24, 0x0101,
-            word_base | param_base << 16, 0, 0, 0]
+            (word_base & 0xFFFF) | (param_base << 16) | ((word_base >> 16) << 26), 0, 0, 0]
 
 
 def float32(value):
@@ -51,12 +51,14 @@ def float32(value):
 
 
 class FullModel:
-    def __init__(self, overlay, model):
+    def __init__(self, overlay, model, profile=False):
         from pynq import Clocks
 
         self.fpga = PynqConv1(Path(overlay).resolve())
         if self.fpga.command(12) != ABI:
             raise RuntimeError("This bitstream does not support the full-model instruction set")
+        if profile and self.fpga.command(12, 1) != 0x4D504133:
+            raise RuntimeError("Install the instrumented programmable.bit and matching HWH")
         self.clock_mhz = Clocks.fclk0_mhz
         self.operation_count = len(model["program"])
         self.scales = model["classifier_scales"]
@@ -89,12 +91,14 @@ class FullModel:
         read = perf_counter()
         accum = [value if value < 2**31 else value - 2**32 for value in raw]
         scores = [float32(float32(value) * scale) for value, scale in zip(accum, self.scales)]
+        scored = perf_counter()
         cycles = self.fpga.command(8)
         return {
             "accum": accum, "scores": scores, "prediction": max(range(len(scores)), key=scores.__getitem__),
             "cycles": cycles, "compute_ms": cycles / self.clock_mhz / 1000,
             "image_load_ms": (loaded - started) * 1000, "start_to_done_ms": (finished - loaded) * 1000,
-            "readback_ms": (read - finished) * 1000, "total_ms": (read - started) * 1000,
+            "readback_ms": (read - finished) * 1000, "score_scale_ms": (scored - read) * 1000,
+            "total_ms": (scored - started) * 1000,
         }
 
 

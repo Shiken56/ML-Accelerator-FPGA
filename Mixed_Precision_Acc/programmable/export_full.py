@@ -18,12 +18,27 @@ BITS = {"int8": 8, "int4": 4, "bnn": 1}
 BANKS = (0, 16384, 32768, 49152)
 
 
-def load_reference(reference):
+def load_reference(reference, variant="mixed"):
     sys.path.insert(0, str(reference.resolve()))
     from models.cpu_integer_resnet20 import CPUIntegerResNet20, quantize_activation
 
     checkpoint = reference / "checkpoints/mixed_precision/qat_mixed_precision_best.pt"
-    return CPUIntegerResNet20(checkpoint), quantize_activation
+    if variant == "mixed":
+        return CPUIntegerResNet20(checkpoint), quantize_activation
+    import torch
+
+    state = torch.load(reference / f"checkpoints/qat_{variant}_best.pt",
+                       map_location="cpu", weights_only=True)
+    if state["weight_format"] != variant:
+        raise ValueError(f"Checkpoint does not use {variant} weights")
+    model_state = {key: state[key] for key in
+                   ("model_state_dict", "calibration_scales", "layer_order")}
+    model_state["precision_map"] = dict.fromkeys(state["layer_order"], variant)
+    with TemporaryDirectory() as directory:
+        converted = Path(directory) / "reference.pt"
+        torch.save(model_state, converted)
+        model = CPUIntegerResNet20(converted)
+    return model, quantize_activation
 
 
 def export_program(model):
@@ -88,7 +103,8 @@ def export_program(model):
     biases.extend(bias.tolist())
     classifier_scales = (scales["linear"] * weight_scale).float().tolist()
     return dict(input=[], weights=weights, biases=biases, multipliers=multipliers, program=program,
-                classifier_scales=classifier_scales, precision=precision), trace
+                classifier_scales=classifier_scales, precision=precision,
+                input_scale=float(scales["conv1"]), operations=[name for name, _, _ in trace]), trace
 
 
 def cpu_case(model, image, image_words, trace_dir, name, label=None):
@@ -107,7 +123,7 @@ def write_simulation(directory, model, case, stages, traces):
     directory.mkdir(parents=True, exist_ok=True)
     commands = list(upload_commands(dict(model, input=case["input"])))
     write_mem(directory / "full_commands.mem",
-              ((op << 48) | (address << 32) | (data & 0xFFFFFFFF)
+              ((op << 52) | (address << 32) | (data & 0xFFFFFFFF)
                for op, address, data in commands), 64)
     expected, manifest = [], []
     for name, base, shortcut in stages:
@@ -164,6 +180,7 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", required=True, type=Path)
+    parser.add_argument("--variant", choices=("mixed", "int8", "int4"), default="mixed")
     parser.add_argument("--input", default=PROJECT / "Mixed_precision_firstlayer/input.mem", type=Path)
     parser.add_argument("--output", default=BOARD_DIR / "full_model.json", type=Path)
     parser.add_argument("--sim-dir", type=Path)
@@ -175,7 +192,9 @@ def main():
     if bool(args.dataset) != bool(args.cases_output):
         parser.error("--dataset and --cases-output must be supplied together")
 
-    model, quantize = load_reference(args.reference)
+    if args.variant != "mixed" and args.output == BOARD_DIR / "full_model.json":
+        parser.error("Specify --output for a fixed-precision model")
+    model, quantize = load_reference(args.reference, args.variant)
     bundle, stages = export_program(model)
     words = [int(word, 16) for word in args.input.read_text().split()]
     if len(words) != 3072 or any(not 0 <= word <= 255 for word in words):

@@ -31,13 +31,13 @@ def conv(src, dst, shape, filters, word_base, param_base, bits, stride, pad, rel
     disjoint(tensor(dst, filters * out_h * out_w), tensor(src, channels * height * width))
     lanes = 32 // bits
     words = filters * ((channels * 9 + lanes - 1) // lanes)
-    if not (0 <= word_base <= 65536 - words and 0 <= param_base <= 1024 - filters):
+    if not (0 <= word_base <= 69632 - words and 0 <= param_base <= 1024 - filters):
         raise ValueError("Convolution parameters exceed memory capacity")
     flags = 1 | ((bits == 4) << 2) | (bool(relu) << 3) | ((stride == 2) << 4) | (pad << 5) | ((bits == 1) << 6)
     return [
         flags, src | (dst << 16),
         width | (height << 8) | (channels << 16) | (filters << 24),
-        out_w | (out_h << 8), word_base | (param_base << 16), 0, 0, 0,
+        out_w | (out_h << 8), (word_base & 0xFFFF) | (param_base << 16) | ((word_base >> 16) << 26), 0, 0, 0,
     ]
 
 
